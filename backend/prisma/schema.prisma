@@ -85,6 +85,26 @@ model RetirementRecord {
   batch   CreditBatch   @relation(fields: [batchId], references: [batchId])
   project CarbonProject @relation(fields: [projectId], references: [projectId])
   ipfsFiles IPFSFile[]
+  certificates RetirementCertificate[]
+}
+
+model RetirementCertificate {
+  id          String   @id @default(cuid())
+  retirementId String
+  beneficiary String
+  amount      Decimal  @db.Decimal(18, 2)
+  projectName String
+  vintageYear Int
+  txHash      String
+  ipfsCid     String?
+  publicUrl   String?
+  createdAt   DateTime @default(now())
+
+  retirement RetirementRecord @relation(fields: [retirementId], references: [id], onDelete: Cascade)
+
+  @@index([retirementId])
+  @@index([beneficiary])
+  @@index([vintageYear])
 }
 
 model MarketListing {

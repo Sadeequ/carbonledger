@@ -23,14 +23,14 @@ export class MarketplaceController {
 
   // ── Project developer / corporation: list credits ────────────────────────
 
-  @Post('list')
+  @Post('listings')
   @Roles('project_developer', 'corporation', 'admin')
   createListing(@Body() dto: CreateListingDto, @Request() req: any) {
     // Fix mass assignment: seller is always the authenticated user
     return this.marketplaceService.createListing({ ...dto, seller: req.user.publicKey });
   }
 
-  @Delete(':id')
+  @Delete('listings/:id')
   async delist(@Param('id') id: string, @Request() req: any) {
     // Fix IDOR: verify the caller owns the listing before delisting
     const listing = await this.marketplaceService.findOne(id);

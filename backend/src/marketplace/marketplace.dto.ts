@@ -4,10 +4,10 @@ import { Type } from "class-transformer";
 export class CreateListingDto {
   @IsString() @Length(1, 64) listingId: string;
   @IsString() @Length(1, 64) projectId: string;
-  @IsString() @Length(1, 64) batchId: string;
+  @IsString() @Length(1, 64) credit_batch_id: string;
   // seller is intentionally omitted — always set from req.user.publicKey in the controller
-  @IsInt() @IsPositive() @Type(() => Number) amountAvailable: number;
-  @IsString() @Length(1, 32) pricePerCredit: string;
+  @IsInt() @IsPositive() @Type(() => Number) amount: number;
+  @IsString() @Length(1, 32) price_per_tonne: string;
   @IsInt() @Min(1990) @Max(new Date().getFullYear() + 1) @Type(() => Number) vintageYear: number;
   @IsString() @Length(1, 64) methodology: string;
   @IsString() @Length(1, 64) country: string;

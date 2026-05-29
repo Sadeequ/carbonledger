@@ -1,14 +1,16 @@
-import { Injectable, NotFoundException, BadRequestException } from "@nestjs/common";
+import { Injectable, NotFoundException, BadRequestException, ForbiddenException } from "@nestjs/common";
 import { PrismaService } from "../prisma.service";
 import { CreateListingDto, PurchaseDto, BulkPurchaseDto, ListingsQueryDto, PaginatedListingsResponse } from "./marketplace.dto";
 import { randomBytes } from "crypto";
 import { ListingsCacheService } from "./listings-cache.service";
+import { MarketplaceContractService } from "./marketplace-contract.service";
 
 @Injectable()
 export class MarketplaceService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly cache: ListingsCacheService,
+    private readonly contractService: MarketplaceContractService,
   ) {}
 
   async findAll(query: ListingsQueryDto): Promise<PaginatedListingsResponse> {
@@ -66,15 +68,29 @@ export class MarketplaceService {
   }
 
   async createListing(dto: CreateListingDto & { seller: string }) {
+    // Verify the caller owns the credit batch via contract read
+    const ownsBatch = await this.contractService.verifyCreditBatchOwnership(dto.credit_batch_id, dto.seller);
+    if (!ownsBatch) {
+      throw new ForbiddenException('You do not own the specified credit batch');
+    }
+
+    // Call list_credits on the carbon_marketplace contract
+    const txHash = await this.contractService.listCredits(
+      dto.listingId,
+      dto.credit_batch_id,
+      dto.amount,
+      dto.price_per_tonne,
+    );
+
     // Fix mass assignment (API3): explicitly pick only allowed fields — never trust the full DTO object
     const result = await this.prisma.marketListing.create({
       data: {
         listingId:       dto.listingId,
         projectId:       dto.projectId,
-        batchId:         dto.batchId,
+        batchId:         dto.credit_batch_id,  // Map credit_batch_id to batchId
         seller:          dto.seller,          // always from req.user.publicKey via controller
-        amountAvailable: dto.amountAvailable,
-        pricePerCredit:  dto.pricePerCredit,
+        amountAvailable: dto.amount,          // Map amount to amountAvailable
+        pricePerCredit:  dto.price_per_tonne, // Map price_per_tonne to pricePerCredit
         vintageYear:     dto.vintageYear,
         methodology:     dto.methodology,
         country:         dto.country,
@@ -82,17 +98,23 @@ export class MarketplaceService {
       },
     });
     await this.cache.invalidateAll();
-    return result;
+    return { ...result, txHash };
   }
 
   async delistListing(listingId: string) {
     await this.findOne(listingId);
+    
+    // Call delist_credits on the carbon_marketplace contract
+    const txHash = await this.contractService.delistCredits(listingId);
+    
+    // Update the listing status to delisted in PostgreSQL
     const result = await this.prisma.marketListing.update({
       where: { listingId },
       data:  { status: "Delisted" },
     });
     await this.cache.invalidateAll();
-    return result;
+    
+    return { ...result, txHash };
   }
 
   async purchase(dto: PurchaseDto) {
