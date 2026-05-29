@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, BadRequestException } from "@nestjs/common";
+import { Injectable, NotFoundException, BadRequestException, ConflictException, UnprocessableEntityException } from "@nestjs/common";
 import { PrismaService } from "../prisma.service";
 import { MintCreditsDto, RetireCreditsDto } from "./credits.dto";
 import { MailService } from "../mail/mail.service";
@@ -71,12 +71,12 @@ export class CreditsService {
     const batch = await this.getBatch(dto.batchId);
 
     if (batch.status === "FullyRetired") {
-      throw new BadRequestException("Credits are already fully retired — retirement is irreversible");
+      throw new ConflictException("Credits are already fully retired — retirement is irreversible");
     }
 
     const batchAmount = Number(batch.amount);
     if (dto.amount > batchAmount) {
-      throw new BadRequestException(`Cannot retire ${dto.amount} tCO₂e — only ${batchAmount} tCO₂e available`);
+      throw new UnprocessableEntityException(`Cannot retire ${dto.amount} tCO₂e — only ${batchAmount} tCO₂e available`);
     }
 
     const retirementId = `ret-${dto.batchId}-${Date.now()}`;
@@ -122,7 +122,12 @@ export class CreditsService {
       amount: retirement.amount,
     });
 
-    return retirement;
+    return {
+      ...retirement,
+      certificateUrl: retirement.certificateCid 
+        ? `https://gateway.pinata.cloud/ipfs/${retirement.certificateCid}` 
+        : null
+    };
   }
 
   async getRetirement(retirementId: string) {
