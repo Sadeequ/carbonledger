@@ -1,81 +1,64 @@
-import { Injectable, NotFoundException, BadRequestException } from "@nestjs/common";
+import { Injectable, NotFoundException, BadRequestException, ForbiddenException } from "@nestjs/common";
 import { PrismaService } from "../prisma.service";
-import { RedisService } from "../redis.service";
-import { CreateListingDto, PurchaseDto, BulkPurchaseDto } from "./marketplace.dto";
+import { CreateListingDto, PurchaseDto, BulkPurchaseDto, ListingsQueryDto, PaginatedListingsResponse } from "./marketplace.dto";
 import { randomBytes } from "crypto";
-
-/** TTL for the listings cache in seconds (60 s per spec). */
-const LISTINGS_TTL = 60;
-
-/** Prefix for all listing-related cache keys. */
-const LISTINGS_KEY_PREFIX = "marketplace:listings";
-
-type ListingFilters = {
-  methodology?: string;
-  vintage?: number;
-  country?: string;
-  minPrice?: string;
-  maxPrice?: string;
-};
+import { ListingsCacheService } from "./listings-cache.service";
+import { MarketplaceContractService } from "./marketplace-contract.service";
 
 @Injectable()
 export class MarketplaceService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly redis: RedisService,
+    private readonly cache: ListingsCacheService,
+    private readonly contractService: MarketplaceContractService,
   ) {}
 
-  // ─── helpers ────────────────────────────────────────────────────────────────
+  async findAll(query: ListingsQueryDto): Promise<PaginatedListingsResponse> {
+    const cacheKey = JSON.stringify(query);
+    const cached = await this.cache.get<PaginatedListingsResponse>(cacheKey);
+    if (cached) return cached;
 
-  /** Builds a deterministic cache key from the active filter set. */
-  private buildCacheKey(filters: ListingFilters): string {
-    const parts = [
-      filters.methodology ?? "",
-      filters.vintage     ?? "",
-      filters.country     ?? "",
-      filters.minPrice    ?? "",
-      filters.maxPrice    ?? "",
-    ];
-    return `${LISTINGS_KEY_PREFIX}:${parts.join("|")}`;
-  }
+    const { methodology, vintage, country, minPrice, maxPrice, search, cursor, limit = 20 } = query;
 
-  /** Invalidates every cached listings page (all filter combinations). */
-  private async invalidateListingsCache(): Promise<void> {
-    await this.redis.delByPattern(`${LISTINGS_KEY_PREFIX}:*`);
-  }
+    const where: any = {
+      status: { in: ["Active", "PartiallyFilled"] },
+      ...(methodology && { methodology }),
+      ...(vintage     && { vintageYear: vintage }),
+      ...(country     && { country }),
+      ...(minPrice    && { pricePerCredit: { gte: minPrice } }),
+      ...(maxPrice    && { pricePerCredit: { lte: maxPrice } }),
+    };
 
-  // ─── public API ─────────────────────────────────────────────────────────────
-
-  /**
-   * Returns active listings, serving from Redis when available.
-   * Also returns a `cacheHit` flag so the controller can set X-Cache.
-   */
-  async findAll(
-    filters: ListingFilters,
-  ): Promise<{ data: unknown[]; cacheHit: boolean }> {
-    const key = this.buildCacheKey(filters);
-
-    // 1. Try cache
-    const cached = await this.redis.get<unknown[]>(key);
-    if (cached !== null) {
-      return { data: cached, cacheHit: true };
+    if (search) {
+      where.OR = [
+        { project: { name: { contains: search, mode: "insensitive" } } },
+        { methodology: { contains: search, mode: "insensitive" } },
+        { country: { contains: search, mode: "insensitive" } },
+        { projectId: { contains: search, mode: "insensitive" } },
+      ];
     }
 
-    // 2. Cache miss – read from DB
-    const data = await this.prisma.marketListing.findMany({
-      where: {
-        status: { in: ["Active", "PartiallyFilled"] },
-        ...(filters.methodology && { methodology: filters.methodology }),
-        ...(filters.vintage     && { vintageYear: filters.vintage }),
-        ...(filters.country     && { country: filters.country }),
-      },
-      orderBy: { createdAt: "desc" },
-    });
+    const [listings, total_count] = await Promise.all([
+      this.prisma.marketListing.findMany({
+        where,
+        orderBy: [
+          { vintageYear: "desc" },
+          { createdAt: "desc" },
+        ],
+        take: limit + 1,
+        cursor: cursor ? { id: cursor } : undefined,
+        skip: cursor ? 1 : 0,
+      }),
+      this.prisma.marketListing.count({ where }),
+    ]);
 
-    // 3. Populate cache (fire-and-forget; failure is non-fatal)
-    await this.redis.set(key, data, LISTINGS_TTL);
+    const hasMore = listings.length > limit;
+    const next_cursor = hasMore ? listings[listings.length - 2].id : undefined;
+    if (hasMore) listings.pop();
 
-    return { data, cacheHit: false };
+    const result = { listings, next_cursor, total_count };
+    await this.cache.set(cacheKey, result);
+    return result;
   }
 
   async findOne(listingId: string) {
@@ -84,22 +67,54 @@ export class MarketplaceService {
     return l;
   }
 
-  async createListing(dto: CreateListingDto) {
-    const listing = await this.prisma.marketListing.create({ data: dto });
-    // Invalidate so the new listing appears immediately on next request
-    await this.invalidateListingsCache();
-    return listing;
+  async createListing(dto: CreateListingDto & { seller: string }) {
+    // Verify the caller owns the credit batch via contract read
+    const ownsBatch = await this.contractService.verifyCreditBatchOwnership(dto.credit_batch_id, dto.seller);
+    if (!ownsBatch) {
+      throw new ForbiddenException('You do not own the specified credit batch');
+    }
+
+    // Call list_credits on the carbon_marketplace contract
+    const txHash = await this.contractService.listCredits(
+      dto.listingId,
+      dto.credit_batch_id,
+      dto.amount,
+      dto.price_per_tonne,
+    );
+
+    // Fix mass assignment (API3): explicitly pick only allowed fields — never trust the full DTO object
+    const result = await this.prisma.marketListing.create({
+      data: {
+        listingId:       dto.listingId,
+        projectId:       dto.projectId,
+        batchId:         dto.credit_batch_id,  // Map credit_batch_id to batchId
+        seller:          dto.seller,          // always from req.user.publicKey via controller
+        amountAvailable: dto.amount,          // Map amount to amountAvailable
+        pricePerCredit:  dto.price_per_tonne, // Map price_per_tonne to pricePerCredit
+        vintageYear:     dto.vintageYear,
+        methodology:     dto.methodology,
+        country:         dto.country,
+        status:          "Active",            // status is never accepted from the client
+      },
+    });
+    await this.cache.invalidateAll();
+    return { ...result, txHash };
   }
 
   async delistListing(listingId: string) {
     await this.findOne(listingId);
-    const updated = await this.prisma.marketListing.update({
+    
+    // Call delist_credits on the carbon_marketplace contract
+    const txHash = await this.contractService.delistCredits(listingId);
+    
+    // Update the listing status to delisted in PostgreSQL
+    const result = await this.prisma.marketListing.update({
       where: { listingId },
       data:  { status: "Delisted" },
     });
-    // Invalidate so the delisted listing disappears immediately
-    await this.invalidateListingsCache();
-    return updated;
+    await this.cache.invalidateAll();
+    
+    return { ...result, txHash };
   }
 
   async purchase(dto: PurchaseDto) {
@@ -127,6 +142,10 @@ export class MarketplaceService {
   }
 
   async bulkPurchase(dto: BulkPurchaseDto) {
+    // Fix API4: enforce cap at service layer in case DTO validation is bypassed
+    if (dto.listingIds.length > 50) {
+      throw new BadRequestException("Bulk purchase is limited to 50 listings per request");
+    }
     const results = [];
     for (let i = 0; i < dto.listingIds.length; i++) {
       const result = await this.purchase({
