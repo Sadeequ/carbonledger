@@ -1,4 +1,5 @@
-import { Controller, Get, Post, Delete, Param, Body, Query, UseGuards } from "@nestjs/common";
+import { Controller, Get, Post, Delete, Param, Body, Query, UseGuards, Res } from "@nestjs/common";
+import { Response } from "express";
 import { AuthGuard } from "@nestjs/passport";
 import { MarketplaceService } from "./marketplace.service";
 import { CreateListingDto, PurchaseDto, BulkPurchaseDto } from "./marketplace.dto";
@@ -8,20 +9,24 @@ export class MarketplaceController {
   constructor(private readonly marketplaceService: MarketplaceService) {}
 
   @Get("listings")
-  findAll(
+  async findAll(
+    @Res({ passthrough: true }) res: Response,
     @Query("methodology") methodology?: string,
     @Query("vintage")     vintage?: string,
     @Query("country")     country?: string,
     @Query("minPrice")    minPrice?: string,
     @Query("maxPrice")    maxPrice?: string,
   ) {
-    return this.marketplaceService.findAll({
+    const { data, cacheHit } = await this.marketplaceService.findAll({
       methodology,
       vintage: vintage ? Number(vintage) : undefined,
       country,
       minPrice,
       maxPrice,
     });
+
+    res.setHeader("X-Cache", cacheHit ? "HIT" : "MISS");
+    return data;
   }
 
   @Get("listings/:id")
