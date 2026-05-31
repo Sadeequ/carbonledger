@@ -53,7 +53,7 @@ export default function HomePage() {
 
   useEffect(() => {
     if (!hasListCountEntered || !aggregateStats) return;
-    const target = aggregateStats.active_listings_count;
+    const target = aggregateStats.totalCreditsRetired;
     if (typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
       setActiveListings(target);
       return;
@@ -61,13 +61,14 @@ export default function HomePage() {
 
     const start = activeListings;
     const delta = target - start;
-    const duration = 500;
+    const duration = 1500;
     const begin = performance.now();
     let frame = 0;
 
     const step = (timestamp: number) => {
       const progress = Math.min((timestamp - begin) / duration, 1);
-      setActiveListings(Math.round(start + delta * progress));
+      const eased = 1 - Math.pow(1 - progress, 3);
+      setActiveListings(Math.round(start + delta * eased));
       if (progress < 1) frame = requestAnimationFrame(step);
     };
 
@@ -136,7 +137,7 @@ export default function HomePage() {
             <StatCard label="Credits Retired"  value={formatTonnes(stats?.totalCreditsRetired ?? 0)}  icon="🔒" sub="Permanently retired on-chain" />
             <StatCard label="Active Projects"  value={String(stats?.activeProjects ?? 0)}             icon="🌍" sub="Verified projects" />
             <div ref={countRef}>
-              <StatCard label="Active Listings" value={String(activeListingsValue)} icon="📈" sub="Active market listings" />
+              <StatCard label="Total Retired" value={new Intl.NumberFormat().format(activeListingsValue)} icon="🔒" sub="Tonnes of CO₂ retired on-chain" />
             </div>
             <StatCard label="Market Volume"    value={`$${formatStroops(stats?.marketplaceVolume ?? "0")} USDC`} icon="💹" sub="Total traded" />
           </>

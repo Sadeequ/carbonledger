@@ -169,6 +169,7 @@ export function useOracleHistory(projectId: string) {
 
 export interface AggregateStats {
   active_listings_count: number;
+  totalCreditsRetired: number;
 }
 
 export function useAggregateStats() {
